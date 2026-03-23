@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "limit-order-book"
+version = "0.1.0"
+description = "High-fidelity limit order book simulation with matching engine, agent-based simulation, execution algorithms, and market microstructure analytics."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Abhishek Wadhwa"},
+]
+dependencies = [
+    "numpy>=1.24",
+    "sortedcontainers>=2.4",
+    "typer>=0.9",
+    "structlog>=23.1",
+    "streamlit>=1.28",
+    "plotly>=5.18",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+]
+
+[project.scripts]
+lob = "src.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
