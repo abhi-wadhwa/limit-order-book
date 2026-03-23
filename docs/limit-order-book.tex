@@ -1,0 +1,196 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+
+\title{Market Microstructure:\\Limit Order Books, Optimal Market Making, and Execution Algorithms}
+\author{Abhi Wadhwa}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+These are my notes on the mathematical foundations of a limit order book simulator. I cover the mechanics of price-time priority matching, the Avellaneda-Stoikov (2008) model for optimal market making, Kyle's (1985) lambda for measuring price impact, and execution algorithms (TWAP, VWAP, Implementation Shortfall). I also discuss bid-ask bounce and order flow imbalance. The emphasis is on building intuition for why these models work the way they do, not just stating the formulas.
+\end{abstract}
+
+\section{The Limit Order Book}
+
+A limit order book is just a data structure that tracks all outstanding buy and sell orders for an asset, organized by price. Buy orders (bids) are sorted in \textbf{descending} order --- the highest bid is at the top because that's the buyer most willing to pay. Sell orders (asks) are sorted in \textbf{ascending} order --- the lowest ask is at the top because that's the seller most willing to sell cheaply.
+
+The \textbf{best bid} is the highest price any buyer is willing to pay. The \textbf{best ask} is the lowest price any seller is willing to accept. The difference between them is the \textbf{spread}:
+\[
+    \text{spread} = p_{\text{ask}} - p_{\text{bid}}
+\]
+The \textbf{mid price} is the average of the two:
+\[
+    s = \frac{p_{\text{ask}} + p_{\text{bid}}}{2}
+\]
+
+\subsection{Price-Time Priority Matching}
+
+The matching rule is what makes this a continuous double auction. When a new order arrives, the matching engine checks whether it can be immediately filled:
+
+\begin{itemize}
+    \item A new \textbf{buy} order at price $p$ matches against the best ask if $p \geq p_{\text{ask}}$.
+    \item A new \textbf{sell} order at price $p$ matches against the best bid if $p \leq p_{\text{bid}}$.
+\end{itemize}
+
+When multiple orders exist at the same price level, they're filled in \textbf{time priority} --- first come, first served. This is the ``price-time priority'' rule that virtually all modern exchanges use.
+
+The implementation uses a sorted dictionary for price levels (giving $O(\log n)$ insertion and $O(1)$ best-price access) and a deque at each price level ($O(1)$ FIFO for time priority). It's elegant in its simplicity --- the data structure directly encodes the matching rules.
+
+\section{Avellaneda-Stoikov Market Making}
+
+This is the part I find most beautiful. The Avellaneda-Stoikov (2008) model answers a fundamental question: \textbf{if you're a market maker, how should you set your bid and ask prices?}
+
+The intuition is straightforward. A market maker profits from the spread --- they buy at the bid and sell at the ask, pocketing the difference. But they face inventory risk: if they accumulate a large long position and the price drops, they lose money. So the optimal strategy needs to balance \textbf{earning the spread} against \textbf{managing inventory risk}.
+
+\subsection{Reservation Price}
+
+The key concept is the \textbf{reservation price}, which is the market maker's inventory-adjusted fair value of the asset. If the mid price is $s$ and the market maker holds inventory $q$ (positive means long), then:
+\[
+    r(s, q, t) = s - q \cdot \gamma \sigma^2 (T - t)
+\]
+
+Let me unpack this. The term $q \cdot \gamma \sigma^2 (T - t)$ is an \textbf{inventory penalty}. When the market maker is long ($q > 0$), the reservation price is \textit{below} the mid --- they're effectively saying ``I think the fair value is lower than the market says, because I already have too much of this thing and I'm worried about the risk.'' When short ($q < 0$), the reservation price is above mid. The parameters:
+
+\begin{itemize}
+    \item $\gamma$ is the risk aversion coefficient. Higher $\gamma$ means the market maker is more nervous about inventory.
+    \item $\sigma^2$ is the asset's variance. More volatile assets make inventory riskier.
+    \item $T - t$ is time remaining. More time means more risk exposure.
+\end{itemize}
+
+\textbf{The trick here} is that multiplying all three together gives you the right scaling. If the asset is very volatile ($\sigma$ large) and the market maker is risk-averse ($\gamma$ large) with lots of time left ($T - t$ large), even a small inventory $q$ causes a big shift in the reservation price. This is exactly the behavior you'd want.
+
+\subsection{Optimal Spread}
+
+Given the reservation price, the optimal spread around it is:
+\[
+    \delta^* = \gamma \sigma^2 (T - t) + \frac{2}{\gamma} \ln\left(1 + \frac{\gamma}{k}\right)
+\]
+
+where $k$ is the order arrival intensity (how many orders per unit time hit the book, modeled as a Poisson process). The market maker then quotes:
+\[
+    p_{\text{bid}} = r - \frac{\delta^*}{2}, \quad p_{\text{ask}} = r + \frac{\delta^*}{2}
+\]
+
+The first term $\gamma \sigma^2(T-t)$ is again about risk --- wider spreads when the asset is volatile and there's lots of time left. The second term $\frac{2}{\gamma}\ln(1 + \gamma/k)$ is about \textbf{adverse selection}. When order flow is sparse ($k$ small), the market maker widens the spread because each incoming order is more likely to be from an informed trader. When $k$ is large (lots of noise traders), the spread tightens because the market maker can afford to be more competitive.
+
+After playing with this for a while, I found that the model produces surprisingly realistic behavior. When the market maker accumulates inventory, the quotes shift asymmetrically --- if they're long, the bid drops more than the ask, incentivizing sells to them and reducing their position. It's a natural mean-reversion mechanism built into the quoting strategy.
+
+\section{Kyle's Lambda}
+
+Kyle's (1985) model is one of the foundational papers in market microstructure, and it introduces the concept of \textbf{price impact}. The idea: when someone submits a large buy order, the price moves up. But how much?
+
+The model has three players: an informed trader (who knows the asset's true value), noise traders (who trade randomly), and a market maker who sets prices. The market maker observes total order flow but can't distinguish informed from noise trading. In equilibrium, the market maker sets:
+\[
+    \Delta p = \lambda \cdot v + \varepsilon
+\]
+
+where $\Delta p$ is the price change, $v$ is the signed order volume (positive for net buying), and $\varepsilon$ is noise. The coefficient $\lambda$ is called \textbf{Kyle's lambda}, and it measures the permanent price impact per unit of order flow.
+
+In Kyle's equilibrium:
+\[
+    \lambda = \frac{\sigma_v}{2\sigma_u}
+\]
+
+where $\sigma_v$ is the standard deviation of the asset's fundamental value and $\sigma_u$ is the standard deviation of noise trading volume. \textbf{A higher $\lambda$ means more information asymmetry} --- each unit of order flow moves the price more because the market maker suspects it's more likely to be informed.
+
+In practice, you estimate $\lambda$ by running a simple linear regression of price changes on signed order flow. The slope coefficient is your estimate of $\lambda$. I compute this over rolling windows to track how price impact evolves during a simulation.
+
+\section{VWAP and Order Flow Imbalance}
+
+Two important market metrics that I compute as analytics:
+
+\subsection{Volume-Weighted Average Price (VWAP)}
+
+VWAP is the benchmark price that execution algorithms try to match. It's just:
+\[
+    \text{VWAP} = \frac{\sum_{i} p_i \cdot q_i}{\sum_{i} q_i}
+\]
+
+where $p_i$ and $q_i$ are the price and quantity of the $i$-th trade. VWAP weights each price by how much volume traded there, so it's a fair ``average price'' for the trading session.
+
+\subsection{Order Flow Imbalance (OFI)}
+
+OFI measures the directional pressure in the market:
+\[
+    \text{OFI} = \frac{V_{\text{buy}} - V_{\text{sell}}}{V_{\text{buy}} + V_{\text{sell}}}
+\]
+
+This ranges from $-1$ (all selling) to $+1$ (all buying). OFI is a leading indicator of short-term price movement --- sustained buying pressure tends to push prices up.
+
+\section{Execution Algorithms}
+
+Large institutional orders can't be submitted all at once without massive price impact. Execution algorithms break a parent order into smaller child orders spread over time. I implemented three:
+
+\subsection{TWAP (Time-Weighted Average Price)}
+
+The simplest algorithm. Split the parent order of quantity $Q$ into $N$ equal slices at regular intervals:
+\[
+    q_i = \frac{Q}{N}, \quad t_i = t_0 + i \cdot \frac{T - t_0}{N}
+\]
+
+TWAP is easy to implement and understand, but it's suboptimal because it ignores volume patterns. If you're buying equal amounts during a low-volume period, you'll have more price impact than during high-volume periods.
+
+\subsection{VWAP (Volume-Weighted Average Price)}
+
+VWAP execution distributes child orders proportional to expected volume:
+\[
+    q_i = Q \cdot w_i, \quad \text{where} \quad \sum_i w_i = 1
+\]
+
+The volume profile $\{w_i\}$ is typically \textbf{U-shaped}: higher volume at the open and close, lower in the middle of the day. By trading more during high-volume periods, you reduce your market impact (more liquidity absorbs your orders) and your executed price should be close to the session VWAP.
+
+\subsection{Implementation Shortfall (Almgren-Chriss)}
+
+This is the most sophisticated approach. The \textbf{implementation shortfall} is the difference between your actual execution price and the price when you decided to trade (the ``arrival price''). The Almgren-Chriss framework explicitly models the tradeoff between:
+
+\begin{itemize}
+    \item \textbf{Market impact}: Trading too fast moves the price against you.
+    \item \textbf{Timing risk}: Trading too slow exposes you to adverse price drift.
+\end{itemize}
+
+The algorithm adapts its execution speed based on realized price drift from arrival:
+\[
+    q_i = q_{\text{base}} \cdot f(\text{drift})
+\]
+
+If the price moves adversely (you want to buy and the price is rising), execution \textbf{accelerates} --- better to pay more now than even more later. If the price moves favorably, execution \textbf{decelerates} --- ride the favorable move and take your time.
+
+This adaptive behavior is what makes IS superior to TWAP and VWAP in volatile markets. It's also why most institutional trading desks prefer IS-based algorithms for large orders.
+
+\section{Bid-Ask Bounce}
+
+One last phenomenon worth discussing. The \textbf{bid-ask bounce} is the observation that trade-to-trade returns exhibit negative first-order autocorrelation:
+\[
+    \rho_1 = \text{Corr}(r_t, r_{t+1}) < 0
+\]
+
+The mechanism is simple: trades alternate between hitting the bid (sell) and lifting the ask (buy). If the ``true'' price is constant at the mid, then a buy trade is recorded at the ask, the next sell trade at the bid, and so on. This creates an artificial oscillation in observed prices, leading to negative autocorrelation.
+
+In a pure model where the spread is $\delta$ and trades alternate perfectly between bid and ask:
+\[
+    \rho_1 \approx -0.25
+\]
+
+I compute $\rho_1$ as a diagnostic in the simulator. If it's significantly different from $-0.25$, it suggests the simulation dynamics are deviating from the simple spread model --- which is expected once you add informed traders and momentum traders, since they create directional runs that offset the bounce effect.
+
+\section{Final Thoughts}
+
+Building this simulator gave me a much deeper appreciation for market microstructure. The Avellaneda-Stoikov model is particularly elegant --- it derives something that traders do intuitively (adjust quotes based on inventory) from a principled optimization framework. Kyle's lambda connects the abstract concept of ``information in order flow'' to a measurable statistic. And the execution algorithms show how even simple ideas (split your order over time) become surprisingly nuanced when you account for volume patterns and price drift.
+
+The whole field sits at this interesting intersection of applied probability, optimization, and game theory. I've only scratched the surface here, but I think these notes cover the essential ideas behind the simulator's design.
+
+\begin{thebibliography}{9}
+\bibitem{AS} Avellaneda, M. and Stoikov, S., ``High-frequency trading in a limit order book,'' \textit{Quantitative Finance}, 8(3):217--224, 2008.
+\bibitem{kyle} Kyle, A.S., ``Continuous Auctions and Insider Trading,'' \textit{Econometrica}, 53(6):1315--1335, 1985.
+\bibitem{AC} Almgren, R. and Chriss, N., ``Optimal execution of portfolio transactions,'' \textit{Journal of Risk}, 3(2):5--39, 2001.
+\bibitem{hasbrouck} Hasbrouck, J., \textit{Empirical Market Microstructure}, Oxford University Press, 2007.
+\end{thebibliography}
+
+\end{document}
